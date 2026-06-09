@@ -1,585 +1,398 @@
-"""
-📚 도서 영수증 자동 정리 에이전트
-Streamlit 기반 웹 애플리케이션
-"""
-
-import os
-import io
-import logging
-import time
-import tempfile
-from datetime import datetime
-from pathlib import Path
-
 import streamlit as st
-from dotenv import load_dotenv
+import pandas as pd
+import yfinance as yf
+import plotly.graph_objects as go
+import plotly.express as px
+from datetime import datetime, timedelta
 
-load_dotenv()
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ── 페이지 설정 ──────────────────────────────────────────────────────────────
+# Set page config
 st.set_page_config(
-    page_title="📚 도서 영수증 에이전트",
-    page_icon="📚",
+    page_title="K-Stock Dashboard | 국내 10대 기업 주식 분석",
+    page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="expanded"
 )
 
-# ── CSS ──────────────────────────────────────────────────────────────────────
+# Custom Premium Styling
 st.markdown("""
-<style>
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Noto+Sans+KR:wght@300;400;700&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Outfit', 'Noto Sans KR', sans-serif;
+    }
+    
+    /* Main Background & Text Color */
+    .stApp {
+        background: linear-gradient(135deg, #0e1117 0%, #161a24 100%);
+        color: #e2e8f0;
+    }
+    
+    /* Metric container styling */
+    div[data-testid="stMetric"] {
+        background: rgba(30, 41, 59, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 1.5rem;
+        border-radius: 16px;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+        backdrop-filter: blur(5px);
+        transition: transform 0.3s ease, border-color 0.3s ease;
+    }
+    
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-4px);
+        border-color: rgba(99, 102, 241, 0.4);
+    }
+    
+    /* Custom headers */
     .main-title {
-        font-size: 2rem;
+        font-size: 3rem;
         font-weight: 800;
-        color: #1e40af;
-        margin-bottom: 0.2rem;
-    }
-    .sub-title {
-        color: #64748b;
-        font-size: 0.95rem;
-        margin-bottom: 1.5rem;
-    }
-    .stat-box {
-        background: #eff6ff;
-        border-left: 4px solid #2563eb;
-        border-radius: 8px;
-        padding: 1rem 1.2rem;
+        background: linear-gradient(90deg, #6366f1 0%, #a855f7 50%, #ec4899 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
         margin-bottom: 0.5rem;
+        letter-spacing: -0.05em;
     }
-    .stat-box .label { color: #475569; font-size: 0.85rem; }
-    .stat-box .value { color: #1e40af; font-size: 1.6rem; font-weight: 700; }
-    .log-success { color: #16a34a; }
-    .log-error   { color: #dc2626; }
-    .log-warning { color: #d97706; }
-    .step-badge {
-        display: inline-block;
-        background: #dbeafe;
-        color: #1d4ed8;
-        border-radius: 999px;
-        padding: 2px 10px;
-        font-size: 0.78rem;
-        font-weight: 600;
-        margin-right: 6px;
+    
+    .subtitle {
+        font-size: 1.1rem;
+        color: #94a3b8;
+        margin-bottom: 2rem;
+        font-weight: 300;
     }
-    div[data-testid="stExpander"] > div > div { padding: 0.5rem 0; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ── session_state 초기화 ──────────────────────────────────────────────────────
-def _init_state():
-    defaults = {
-        "results": [],        # list[ParsedReceipt]
-        "failed": [],         # list[dict]
-        "df": None,           # pd.DataFrame
-        "excel_bytes": None,  # bytes
-        "excel_name": "",
-        "logs": [],           # list[dict]
-        "processed": False,
-        "processing": False,
+    
+    /* Sidebar customization */
+    section[data-testid="stSidebar"] {
+        background-color: #0b0d13 !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.05);
     }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    
+    /* Tab formatting */
+    button[data-baseweb="tab"] {
+        font-size: 1.1rem !important;
+        font-weight: 600 !important;
+        color: #94a3b8 !important;
+        transition: all 0.3s;
+    }
+    
+    button[aria-selected="true"] {
+        color: #6366f1 !important;
+        border-bottom-color: #6366f1 !important;
+    }
+    
+    /* Card Container */
+    .card {
+        background: rgba(30, 41, 59, 0.3);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 20px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
+# Define the Top 10 Stocks
+STOCKS = {
+    "삼성전자": "005930.KS",
+    "SK하이닉스": "000660.KS",
+    "LG에너지솔루션": "373220.KS",
+    "삼성바이오로직스": "207940.KS",
+    "현대자동차": "005380.KS",
+    "기아": "000270.KS",
+    "셀트리온": "068270.KS",
+    "KB금융": "105560.KS",
+    "POSCO홀딩스": "005490.KS",
+    "NAVER": "035420.KS"
+}
 
-_init_state()
+# Sidebar inputs
+st.sidebar.markdown("<h2 style='color: #6366f1; font-weight: 700; margin-bottom: 1rem;'>⚙️ 대시보드 설정</h2>", unsafe_allow_html=True)
 
+selected_stock_name = st.sidebar.selectbox(
+    "📊 분석할 종목 선택",
+    list(STOCKS.keys()),
+    index=0
+)
+ticker = STOCKS[selected_stock_name]
 
-# ── 사이드바 ─────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## ⚙️ 설정")
-    api_key = st.text_input(
-        "OpenAI API Key",
-        value=os.getenv("OPENAI_API_KEY", ""),
-        type="password",
-        help="sk-... 형식의 OpenAI API 키를 입력하세요.",
-    )
+# Date range selector
+st.sidebar.markdown("---")
+st.sidebar.markdown("<p style='font-weight: 600; color: #e2e8f0; margin-bottom: 0.5rem;'>📅 조회 기간</p>", unsafe_allow_html=True)
+date_options = {
+    "1개월": 30,
+    "3개월": 90,
+    "6개월": 180,
+    "1년": 365,
+    "3년": 365 * 3,
+    "5년": 365 * 5
+}
+selected_period = st.sidebar.selectbox("기간 설정", list(date_options.keys()), index=2)
+days_to_subtract = date_options[selected_period]
 
-    st.markdown("---")
-    st.markdown("### 처리 옵션")
-    ocr_threshold = st.slider(
-        "OCR 신뢰도 임계값",
-        min_value=0.0, max_value=1.0, value=0.50, step=0.05,
-        help="이 값 미만이면 OCR 재시도. 실제 영수증 사진은 0.3~0.5 권장.",
-    )
-    classify_threshold = st.slider(
-        "분류 신뢰도 임계값",
-        min_value=0.0, max_value=1.0, value=0.70, step=0.05,
-        help="이 값 미만이면 '미확인' 태그 처리.",
-    )
-    model_name = st.selectbox(
-        "LLM 모델",
-        ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"],
-        index=0,
-    )
+start_date = datetime.today() - timedelta(days=days_to_subtract)
+end_date = datetime.today()
 
-    st.markdown("---")
-    st.markdown("### 도움말")
-    with st.expander("지원 형식 / 제한"):
-        st.markdown("""
-- **형식**: JPG, PNG, WEBP, PDF
-- **최대 크기**: 20MB / 파일
-- **최대 파일 수**: 50개
-- **OCR 언어**: 한국어 + 영어
-        """)
-    with st.expander("처리 단계"):
-        st.markdown("""
-1. 파일 검증
-2. 이미지 전처리 (회전·노이즈·이진화)
-3. OCR 텍스트 추출
-4. GPT 영수증 파싱
-5. 도서 장르 분류
-6. 엑셀 3시트 생성
-        """)
+# Function to fetch stock data helper
+@st.cache_data(ttl=600)
+def load_stock_data(ticker, start, end):
+    try:
+        data = yf.download(ticker, start=start, end=end)
+        if data.empty:
+            return None
+        # Reset index to make Date a column
+        data = data.reset_index()
+        return data
+    except Exception as e:
+        return None
 
+@st.cache_data(ttl=3600)
+def load_stock_info(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+        return info
+    except:
+        return {}
 
-# ── 메인 타이틀 ───────────────────────────────────────────────────────────────
-st.markdown('<div class="main-title">📚 도서 영수증 자동 정리 에이전트</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">영수증 이미지/PDF를 업로드하면 도서 목록 엑셀 파일을 자동으로 생성합니다.</div>', unsafe_allow_html=True)
+# Load main data
+data = load_stock_data(ticker, start_date, end_date)
+info = load_stock_info(ticker)
 
-# ── 탭 ───────────────────────────────────────────────────────────────────────
-tab_upload, tab_result, tab_log = st.tabs(["📤 파일 업로드", "📊 결과 확인", "🗒️ 처리 로그"])
+# Header
+st.markdown(f"<h1 class='main-title'>{selected_stock_name} ({ticker})</h1>", unsafe_allow_html=True)
+st.markdown("<p class='subtitle'>국내 Top 10 시가총액 기업 실시간 주가 데이터 & 인터랙티브 시각화 대시보드</p>", unsafe_allow_html=True)
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# TAB 1: 파일 업로드
-# ═══════════════════════════════════════════════════════════════════════
-with tab_upload:
-    st.markdown("### 영수증 파일 업로드")
-
-    uploaded_files = st.file_uploader(
-        "파일을 선택하거나 드래그하세요 (최대 50개)",
-        type=["jpg", "jpeg", "png", "webp", "pdf"],
-        accept_multiple_files=True,
-        key="file_uploader",
-    )
-
-    if uploaded_files:
-        st.info(f"**{len(uploaded_files)}개** 파일이 선택되었습니다.")
-        with st.expander("선택된 파일 목록"):
-            for f in uploaded_files:
-                size_kb = len(f.getbuffer()) / 1024
-                st.write(f"- `{f.name}` ({size_kb:.1f} KB)")
-
-    col_btn, col_reset = st.columns([1, 5])
-    with col_btn:
-        start_btn = st.button(
-            "🚀 처리 시작",
-            type="primary",
-            disabled=not uploaded_files or not api_key,
-            use_container_width=True,
+if data is not None and not data.empty:
+    # Latest statistics
+    latest_row = data.iloc[-1]
+    prev_row = data.iloc[-2] if len(data) > 1 else latest_row
+    
+    current_price = float(latest_row['Close'])
+    prev_price = float(prev_row['Close'])
+    price_change = current_price - prev_price
+    price_change_percent = (price_change / prev_price) * 100
+    
+    # 3-Column Key Metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            label="현재가 (종가 기준)",
+            value=f"{current_price:,.0f} 원",
+            delta=f"{price_change:,.0f} 원 ({price_change_percent:+.2f}%)"
         )
-    with col_reset:
-        if st.button("🔄 초기화", use_container_width=False):
-            for k in ["results", "failed", "df", "excel_bytes", "excel_name", "logs", "processed", "processing"]:
-                st.session_state[k] = [] if k in ("results", "failed", "logs") else (None if k in ("df", "excel_bytes") else ("" if k == "excel_name" else False))
-            st.rerun()
-
-    if not api_key:
-        st.warning("⚠️ 사이드바에서 OpenAI API Key를 먼저 입력하세요.")
-
-    # ── 처리 실행 ────────────────────────────────────────────────────────
-    if start_btn and uploaded_files and api_key:
-        from agent.models import BookItem, ParsedReceipt, BatchResult
-        from modules.validator import validate_format, validate_size, validate_quality
-        from modules.preprocessor import preprocess_image, pdf_to_images
-        from modules.ocr import run_ocr
-        from modules.llm_parser import parse_receipt_text
-        from modules.classifier import classify_book, GENRE_CATEGORIES
-        from modules.merger import merge_results
-        from modules.excel_generator import generate_excel
-        from utils.session import generate_session_id, create_temp_dir, cleanup_temp_dir, save_uploaded_file
-        from errors.error_codes import get_error
-
-        # 파일 수 제한
-        if len(uploaded_files) > 50:
-            st.error(get_error("ERR-13").message_ko)
-            st.stop()
-
-        st.session_state["results"] = []
-        st.session_state["failed"] = []
-        st.session_state["logs"] = []
-        st.session_state["processed"] = False
-        st.session_state["excel_bytes"] = None
-
-        session_id = generate_session_id()
-        temp_dir = create_temp_dir()
-        pre_dir = os.path.join(temp_dir, "preprocessed")
-        out_dir = os.path.join(temp_dir, "output")
-        os.makedirs(pre_dir, exist_ok=True)
-        os.makedirs(out_dir, exist_ok=True)
-
-        start_ts = time.time()
-
-        progress_bar = st.progress(0, text="처리를 시작합니다...")
-        status_placeholder = st.empty()
-
-        def log(filename, step, message, level="info"):
-            icon = {"info": "ℹ️", "success": "✅", "warning": "⚠️", "error": "❌"}.get(level, "ℹ️")
-            st.session_state["logs"].append({
-                "file": filename,
-                "step": step,
-                "message": message,
-                "level": level,
-                "icon": icon,
-            })
-
-        total = len(uploaded_files)
-
-        for idx, uploaded_file in enumerate(uploaded_files):
-            fname = uploaded_file.name
-            pct = int((idx / total) * 100)
-            progress_bar.progress(pct, text=f"처리 중: {fname} ({idx+1}/{total})")
-            status_placeholder.info(f"**{fname}** 처리 중...")
-
-            try:
-                # ── 1. 파일 저장 ─────────────────────────────────────────
-                raw_path = save_uploaded_file(uploaded_file, temp_dir)
-                file_size = os.path.getsize(raw_path)
-                ext = Path(fname).suffix.lstrip(".").lower()
-                log(fname, "검증", f"파일 저장 완료 ({file_size/1024:.1f} KB)")
-
-                # ── 2. 형식 검증 ──────────────────────────────────────────
-                if not validate_format(fname):
-                    raise ValueError(get_error("ERR-01").message_ko)
-                if not validate_size(file_size):
-                    raise ValueError(get_error("ERR-02").message_ko)
-                log(fname, "검증", "형식·크기 검증 통과", "success")
-
-                # ── 3. 이미지 목록 구성 (PDF → 페이지별) ────────────────────
-                if ext == "pdf":
-                    log(fname, "전처리", "PDF → 이미지 변환 중...")
-                    try:
-                        image_paths = pdf_to_images(raw_path, pre_dir)
-                        log(fname, "전처리", f"PDF {len(image_paths)}페이지 변환 완료", "success")
-                    except RuntimeError as e:
-                        log(fname, "전처리", f"PDF 변환 실패: {e}", "error")
-                        raise
-                else:
-                    # 품질 검사
-                    ok, err_code = validate_quality(raw_path)
-                    if not ok:
-                        log(fname, "검증", get_error(err_code).message_ko, "warning")
-                    image_paths = [raw_path]
-
-                # ── 4. 전처리 + OCR ───────────────────────────────────────
-                all_text_parts = []
-                total_confidence = 0.0
-
-                for img_path in image_paths:
-                    pre_out = os.path.join(pre_dir, f"pre_{os.path.basename(img_path)}")
-                    try:
-                        pre_path = preprocess_image(img_path, pre_out)
-                        log(fname, "전처리", f"전처리 완료: {os.path.basename(img_path)}", "success")
-                    except RuntimeError as e:
-                        log(fname, "전처리", f"전처리 실패, 원본으로 OCR 시도: {e}", "warning")
-                        pre_path = img_path
-
-                    ocr_text = ""
-                    ocr_conf = 0.0
-                    ocr_retry = 0
-                    max_ocr_retry = 3
-
-                    while ocr_retry < max_ocr_retry:
-                        try:
-                            ocr_text, ocr_conf = run_ocr(pre_path)
-                            break
-                        except RuntimeError as e:
-                            ocr_retry += 1
-                            log(fname, "OCR", f"OCR 실패 (시도 {ocr_retry}/{max_ocr_retry}): {e}", "warning")
-                            if ocr_retry >= max_ocr_retry:
-                                raise
-
-                    if ocr_conf < ocr_threshold:
-                        log(fname, "OCR", f"OCR 신뢰도 낮음 ({ocr_conf:.1%}) — 계속 진행", "warning")
-                    else:
-                        log(fname, "OCR", f"OCR 완료 (신뢰도 {ocr_conf:.1%})", "success")
-
-                    all_text_parts.append(ocr_text)
-                    total_confidence += ocr_conf
-
-                combined_text = "\n\n".join(all_text_parts)
-                avg_confidence = total_confidence / len(image_paths) if image_paths else 0.0
-
-                if not combined_text.strip():
-                    raise ValueError("OCR 결과가 비어있습니다. 이미지를 확인하세요.")
-
-                # ── 5. LLM 파싱 ───────────────────────────────────────────
-                log(fname, "파싱", "GPT로 도서 정보 추출 중...")
-                parsed = parse_receipt_text(combined_text, api_key, model=model_name)
-
-                books_raw = parsed.get("books", [])
-                if not books_raw:
-                    raise ValueError(get_error("ERR-09").message_ko)
-                log(fname, "파싱", f"도서 {len(books_raw)}권 추출 완료", "success")
-
-                # ── 6. 도서 분류 ───────────────────────────────────────────
-                log(fname, "분류", "장르 분류 중...")
-                book_items = []
-                for b in books_raw:
-                    title = b.get("title", "")
-                    price = b.get("price", 0)
-                    if not title:
-                        continue
-                    if price <= 0:
-                        log(fname, "분류", f"'{title}' 가격 이상 (price={price}) — 0으로 처리", "warning")
-
-                    try:
-                        cls = classify_book(title, b.get("isbn"), api_key, model=model_name)
-                    except Exception as e:
-                        log(fname, "분류", f"'{title}' 분류 실패: {e}", "warning")
-                        cls = {"genre": "기타", "subgenre": "", "confidence": 0.0,
-                               "author": "", "publisher": "", "needs_review": True}
-
-                    book_items.append(BookItem(
-                        title=title,
-                        price=max(0, price),
-                        quantity=b.get("quantity", 1) or 1,
-                        discount=b.get("discount", 0) or 0,
-                        isbn=b.get("isbn"),
-                        genre=cls["genre"],
-                        subgenre=cls.get("subgenre", ""),
-                        classify_confidence=cls["confidence"],
-                        needs_review=cls["needs_review"],
-                        author=cls.get("author", ""),
-                        publisher=cls.get("publisher", ""),
-                    ))
-
-                log(fname, "분류", f"장르 분류 완료 ({len(book_items)}권)", "success")
-
-                # ── 7. ParsedReceipt 생성 ─────────────────────────────────
-                from datetime import date as date_type
-                rdate = None
-                if parsed.get("receipt_date"):
-                    try:
-                        parts = str(parsed["receipt_date"]).split("-")
-                        rdate = date_type(int(parts[0]), int(parts[1]), int(parts[2]))
-                    except Exception:
-                        pass
-
-                receipt_id = f"RCP-{datetime.now().strftime('%Y%m%d')}-{idx+1:03d}"
-                receipt = ParsedReceipt(
-                    receipt_id=receipt_id,
-                    source_file=fname,
-                    receipt_date=rdate,
-                    store_name=parsed.get("store_name"),
-                    total_amount=parsed.get("total_amount"),
-                    books=book_items,
-                    ocr_confidence=avg_confidence,
-                    parse_confidence=0.9,
-                )
-                st.session_state["results"].append(receipt)
-                log(fname, "완료", f"처리 완료 ✅ ({len(book_items)}권)", "success")
-
-            except Exception as e:
-                msg = str(e)
-                st.session_state["failed"].append({"file": fname, "error": msg})
-                log(fname, "오류", msg, "error")
-
-        # ── 8. 병합 + 엑셀 생성 ────────────────────────────────────────────
-        progress_bar.progress(95, text="엑셀 파일 생성 중...")
-
-        if st.session_state["results"]:
-            from modules.merger import merge_results
-            from modules.excel_generator import generate_excel
-
-            df = merge_results(st.session_state["results"])
-            st.session_state["df"] = df
-
-            excel_name = f"도서목록_{datetime.now().strftime('%Y%m%d')}_{session_id[:8]}.xlsx"
-            excel_path = os.path.join(out_dir, excel_name)
-            generate_excel(df, excel_path)
-
-            with open(excel_path, "rb") as f:
-                st.session_state["excel_bytes"] = f.read()
-            st.session_state["excel_name"] = excel_name
-            log("시스템", "생성", f"엑셀 파일 생성 완료: {excel_name}", "success")
+        
+    with col2:
+        high_price = float(latest_row['High'])
+        st.metric(
+            label="오늘 고가",
+            value=f"{high_price:,.0f} 원",
+            delta=f"저가 대비 {(high_price - float(latest_row['Low'])):+,.0f} 원",
+            delta_color="normal"
+        )
+        
+    with col3:
+        volume = float(latest_row['Volume'])
+        st.metric(
+            label="거래량",
+            value=f"{volume:,.0f} 주",
+            delta=f"전일 대비 {volume - float(prev_row['Volume']):+,.0f} 주",
+            delta_color="off"
+        )
+        
+    with col4:
+        # Market Cap formatting
+        market_cap = info.get('marketCap', 0)
+        if market_cap > 0:
+            market_cap_trillion = market_cap / 1_000_000_000_000
+            market_cap_str = f"{market_cap_trillion:,.1f} 조원"
         else:
-            log("시스템", "생성", "처리된 영수증이 없어 엑셀을 생성하지 않았습니다.", "warning")
-
-        elapsed = time.time() - start_ts
-        st.session_state["processed"] = True
-        progress_bar.progress(100, text=f"완료! (소요 시간: {elapsed:.1f}초)")
-
-        success_count = len(st.session_state["results"])
-        fail_count = len(st.session_state["failed"])
-        status_placeholder.success(
-            f"처리 완료: **성공 {success_count}개** / 실패 {fail_count}개 / 소요 {elapsed:.1f}초"
+            market_cap_str = "정보 없음"
+        
+        st.metric(
+            label="시가총액",
+            value=market_cap_str,
+            delta="코스피 기준"
         )
 
-        try:
-            cleanup_temp_dir(temp_dir)
-        except Exception:
-            pass
-
-        if st.session_state["excel_bytes"]:
-            st.info("👉 **결과 확인** 탭에서 도서 목록을 확인하고 엑셀을 다운로드하세요.")
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# TAB 2: 결과 확인
-# ═══════════════════════════════════════════════════════════════════════
-with tab_result:
-    if not st.session_state["processed"]:
-        st.info("아직 처리된 결과가 없습니다. **파일 업로드** 탭에서 영수증을 처리하세요.")
-    else:
-        df = st.session_state.get("df")
-
-        if df is None or len(df) == 0:
-            st.warning("추출된 도서 데이터가 없습니다. 처리 로그를 확인하세요.")
+    # Main Tabs
+    tab1, tab2, tab3 = st.tabs(["📈 차트 분석", "🔍 상세 재무 및 기업 정보", "⚖️ 10대 기업 비교"])
+    
+    with tab1:
+        # Technical Indicator Controls
+        st.markdown("<h3 style='color: #a855f7; font-weight: 600;'>주가 추이 및 지표 분석</h3>", unsafe_allow_html=True)
+        col_ctrl1, col_ctrl2 = st.columns(2)
+        with col_ctrl1:
+            chart_type = st.radio("차트 종류 선택", ["봉 차트 (Candlestick)", "선 차트 (Line)"], horizontal=True)
+        with col_ctrl2:
+            show_ma = st.multiselect("이동평균선(MA) 추가", ["MA 20", "MA 50", "MA 120"], default=["MA 20", "MA 50"])
+            
+        # Add MAs to dataframe
+        df_chart = data.copy()
+        if "MA 20" in show_ma:
+            df_chart['MA20'] = df_chart['Close'].rolling(window=20).mean()
+        if "MA 50" in show_ma:
+            df_chart['MA50'] = df_chart['Close'].rolling(window=50).mean()
+        if "MA 120" in show_ma:
+            df_chart['MA120'] = df_chart['Close'].rolling(window=120).mean()
+            
+        fig = go.Figure()
+        
+        # Draw base stock chart
+        if chart_type == "봉 차트 (Candlestick)":
+            fig.add_trace(go.Candlestick(
+                x=df_chart['Date'],
+                open=df_chart['Open'],
+                high=df_chart['High'],
+                low=df_chart['Low'],
+                close=df_chart['Close'],
+                name="주가",
+                increasing_line_color='#ef4444', # Red for Korea stock increase
+                decreasing_line_color='#3b82f6'  # Blue for decrease
+            ))
         else:
-            # ── 요약 통계 ────────────────────────────────────────────────
-            total_books = len(df)
-            total_amount = int(df["amount"].sum())
-            review_cnt = int(df["needs_review"].sum())
-            success_rate = (total_books - review_cnt) / total_books * 100 if total_books else 0
-
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                st.metric("📚 총 도서 수", f"{total_books}권")
-            with c2:
-                st.metric("💰 총 구매 금액", f"{total_amount:,}원")
-            with c3:
-                st.metric("✅ 분류 성공률", f"{success_rate:.1f}%")
-            with c4:
-                st.metric("⚠️ 검토 필요", f"{review_cnt}건")
-
-            st.markdown("---")
-
-            # ── 엑셀 다운로드 버튼 ────────────────────────────────────────
-            if st.session_state["excel_bytes"]:
-                st.download_button(
-                    label="⬇️ 엑셀 파일 다운로드 (.xlsx)",
-                    data=st.session_state["excel_bytes"],
-                    file_name=st.session_state["excel_name"],
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                    use_container_width=False,
-                )
-
-            st.markdown("---")
-
-            # ── 데이터 필터 ──────────────────────────────────────────────
-            st.markdown("### 📋 전체 도서 목록")
-
-            col_f1, col_f2 = st.columns([1, 2])
-            with col_f1:
-                genre_options = ["전체"] + sorted(df["genre"].unique().tolist())
-                selected_genre = st.selectbox("장르 필터", genre_options)
-            with col_f2:
-                search_query = st.text_input("도서명 검색", placeholder="검색어를 입력하세요...")
-
-            filtered_df = df.copy()
-            if selected_genre != "전체":
-                filtered_df = filtered_df[filtered_df["genre"] == selected_genre]
-            if search_query:
-                filtered_df = filtered_df[
-                    filtered_df["title"].str.contains(search_query, case=False, na=False)
-                ]
-
-            # 표시용 컬럼 이름 변경
-            display_df = filtered_df.rename(columns={
-                "title": "도서명", "author": "저자", "publisher": "출판사",
-                "isbn": "ISBN", "genre": "장르", "subgenre": "세부장르",
-                "price": "정가", "quantity": "수량", "amount": "금액",
-                "receipt_date": "구매일", "store_name": "서점명",
-                "receipt_id": "영수증ID", "confidence": "신뢰도", "needs_review": "검토필요",
-            })
-
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                height=min(600, 60 + 35 * len(filtered_df)),
-                column_config={
-                    "정가": st.column_config.NumberColumn(format="%d원"),
-                    "금액": st.column_config.NumberColumn(format="%d원"),
-                    "신뢰도": st.column_config.NumberColumn(format="%.1%"),
-                    "검토필요": st.column_config.CheckboxColumn(),
-                },
-            )
-
-            st.caption(f"표시: {len(filtered_df)}건 / 전체: {total_books}건")
-
-            # ── 장르별 분포 ──────────────────────────────────────────────
-            if len(df) > 0:
-                st.markdown("---")
-                st.markdown("### 📊 장르별 분포")
-                import pandas as pd
-                genre_counts = df.groupby("genre").agg(
-                    도서수=("title", "count"),
-                    총금액=("amount", "sum")
-                ).reset_index().rename(columns={"genre": "장르"})
-                genre_counts["총금액"] = genre_counts["총금액"].astype(int)
-
-                col_chart1, col_chart2 = st.columns(2)
-                with col_chart1:
-                    st.bar_chart(genre_counts.set_index("장르")["도서수"])
-                with col_chart2:
-                    st.bar_chart(genre_counts.set_index("장르")["총금액"])
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# TAB 3: 처리 로그
-# ═══════════════════════════════════════════════════════════════════════
-with tab_log:
-    logs = st.session_state.get("logs", [])
-
-    if not logs:
-        st.info("아직 처리 로그가 없습니다. 파일을 처리하면 여기에 기록됩니다.")
-    else:
-        # 요약
-        success_logs = [l for l in logs if l["level"] == "success"]
-        error_logs = [l for l in logs if l["level"] == "error"]
-        warning_logs = [l for l in logs if l["level"] == "warning"]
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("✅ 성공", len(success_logs))
-        c2.metric("⚠️ 경고", len(warning_logs))
-        c3.metric("❌ 오류", len(error_logs))
-
-        st.markdown("---")
-
-        # 필터
-        level_filter = st.selectbox(
-            "로그 레벨",
-            ["전체", "success", "warning", "error", "info"],
-            format_func=lambda x: {"전체": "전체", "success": "✅ 성공", "warning": "⚠️ 경고",
-                                    "error": "❌ 오류", "info": "ℹ️ 정보"}.get(x, x),
+            fig.add_trace(go.Scatter(
+                x=df_chart['Date'],
+                y=df_chart['Close'],
+                mode='lines',
+                name="종가",
+                line=dict(color='#6366f1', width=3)
+            ))
+            
+        # Add MAs to Plotly figure
+        ma_colors = {"MA20": "#10b981", "MA50": "#f59e0b", "MA120": "#a855f7"}
+        for ma in ["MA20", "MA50", "MA120"]:
+            if ma in df_chart.columns:
+                fig.add_trace(go.Scatter(
+                    x=df_chart['Date'],
+                    y=df_chart[ma],
+                    mode='lines',
+                    name=ma.replace('MA', '이동평균선 '),
+                    line=dict(width=1.5, color=ma_colors[ma])
+                ))
+                
+        fig.update_layout(
+            template="plotly_dark",
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            xaxis_rangeslider_visible=False,
+            height=500,
+            margin=dict(l=10, r=10, t=20, b=20),
+            xaxis=dict(gridcolor='rgba(255,255,255,0.05)'),
+            yaxis=dict(gridcolor='rgba(255,255,255,0.05)', tickformat=",.0f")
         )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Volume Chart
+        volume_fig = px.bar(
+            df_chart, 
+            x='Date', 
+            y='Volume', 
+            title="거래량 추이",
+            color_discrete_sequence=['#475569']
+        )
+        volume_fig.update_layout(
+            template="plotly_dark",
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            height=200,
+            margin=dict(l=10, r=10, t=40, b=10),
+            xaxis=dict(gridcolor='rgba(255,255,255,0.05)'),
+            yaxis=dict(gridcolor='rgba(255,255,255,0.05)', tickformat=",.0f")
+        )
+        st.plotly_chart(volume_fig, use_container_width=True)
 
-        filtered_logs = logs if level_filter == "전체" else [l for l in logs if l["level"] == level_filter]
+    with tab2:
+        st.markdown("<h3 style='color: #ec4899; font-weight: 600;'>기업 기본 정보</h3>", unsafe_allow_html=True)
+        
+        if info:
+            # Display summary description
+            summary = info.get('longBusinessSummary', '설명 정보가 없습니다.')
+            st.markdown(f"<div class='card'>{summary}</div>", unsafe_allow_html=True)
+            
+            # Key statistics in grid
+            col_info1, col_info2 = st.columns(2)
+            
+            with col_info1:
+                stats_left = {
+                    "기업 영문명": info.get('longName', 'N/A'),
+                    "웹사이트": info.get('website', 'N/A'),
+                    "업종 (Sector)": info.get('sector', 'N/A'),
+                    "주요 산업 (Industry)": info.get('industry', 'N/A'),
+                }
+                df_left = pd.DataFrame(list(stats_left.items()), columns=["항목", "내용"])
+                st.dataframe(df_left, hide_index=True, use_container_width=True)
+                
+            with col_info2:
+                stats_right = {
+                    "PER (Trailing PE)": f"{info.get('trailingPE', 0):.2f}" if info.get('trailingPE') else 'N/A',
+                    "PBR (Price to Book)": f"{info.get('priceToBook', 0):.2f}" if info.get('priceToBook') else 'N/A',
+                    "52주 최고가": f"{info.get('fiftyTwoWeekHigh', 0):,.0f} 원" if info.get('fiftyTwoWeekHigh') else 'N/A',
+                    "52주 최저가": f"{info.get('fiftyTwoWeekLow', 0):,.0f} 원" if info.get('fiftyTwoWeekLow') else 'N/A',
+                }
+                df_right = pd.DataFrame(list(stats_right.items()), columns=["항목", "내용"])
+                st.dataframe(df_right, hide_index=True, use_container_width=True)
+        else:
+            st.warning("이 종목에 대한 실시간 기업 상세 프로필 정보를 불러올 수 없습니다. (API 한계 또는 인터넷 미연결)")
 
-        # 로그 출력
-        prev_file = None
-        for entry in filtered_logs:
-            if entry["file"] != prev_file:
-                st.markdown(f"**📄 {entry['file']}**")
-                prev_file = entry["file"]
-
-            icon = entry["icon"]
-            step = entry["step"]
-            msg = entry["message"]
-            color_map = {
-                "success": "#16a34a",
-                "error": "#dc2626",
-                "warning": "#d97706",
-                "info": "#475569",
-            }
-            color = color_map.get(entry["level"], "#475569")
-            st.markdown(
-                f'<span style="color:{color}">{icon} '
-                f'<span style="background:#f1f5f9;border-radius:4px;padding:1px 7px;font-size:0.78rem;color:#1d4ed8">{step}</span>'
-                f' {msg}</span>',
-                unsafe_allow_html=True,
+    with tab3:
+        st.markdown("<h3 style='color: #6366f1; font-weight: 600;'>국내 10대 기업 주가 동향 비교 (최근 1개월 기준)</h3>", unsafe_allow_html=True)
+        
+        # Load last 30 days of all stocks to compare performance
+        compare_data = []
+        comp_start = datetime.today() - timedelta(days=30)
+        
+        with st.spinner("비교 데이터 로딩 중..."):
+            for name, ticker_code in STOCKS.items():
+                hist = load_stock_data(ticker_code, comp_start, end_date)
+                if hist is not None and not hist.empty:
+                    # Calculate cumulative return starting from 0% at the start of period
+                    first_price = float(hist.iloc[0]['Close'])
+                    hist = hist.copy()
+                    hist['StockName'] = name
+                    # Cumulative Return = (Price / First Price - 1) * 100
+                    hist['CumulativeReturn'] = (hist['Close'] / first_price - 1) * 100
+                    compare_data.append(hist[['Date', 'StockName', 'CumulativeReturn', 'Close']])
+                    
+        if compare_data:
+            df_compare = pd.concat(compare_data)
+            
+            # Interactive Line chart of cumulative returns
+            comp_fig = px.line(
+                df_compare,
+                x='Date',
+                y='CumulativeReturn',
+                color='StockName',
+                title="10대 기업 최근 1개월 누적 수익률 비교 (%)",
+                labels={'CumulativeReturn': '누적 수익률 (%)', 'Date': '날짜', 'StockName': '종목명'}
             )
+            comp_fig.update_layout(
+                template="plotly_dark",
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                height=450,
+                yaxis=dict(ticksuffix="%", gridcolor='rgba(255,255,255,0.05)'),
+                xaxis=dict(gridcolor='rgba(255,255,255,0.05)')
+            )
+            st.plotly_chart(comp_fig, use_container_width=True)
+            
+            # Summary Table
+            latest_returns = []
+            for name in STOCKS.keys():
+                sub = df_compare[df_compare['StockName'] == name]
+                if not sub.empty:
+                    latest_val = sub.iloc[-1]
+                    latest_returns.append({
+                        "종목명": name,
+                        "현재 주가": f"{float(latest_val['Close']):,.0f} 원",
+                        "최근 1개월 수익률": f"{float(latest_val['CumulativeReturn']):+.2f}%"
+                    })
+            df_returns = pd.DataFrame(latest_returns)
+            st.markdown("<p style='font-weight: 600;'>📊 기업별 요약 표</p>", unsafe_allow_html=True)
+            st.dataframe(df_returns, hide_index=True, use_container_width=True)
+        else:
+            st.error("비교 데이터를 불러올 수 없습니다.")
 
-        # 실패 파일 목록
-        if st.session_state.get("failed"):
-            st.markdown("---")
-            st.markdown("### ❌ 처리 실패 파일")
-            for item in st.session_state["failed"]:
-                with st.expander(f"❌ {item['file']}"):
-                    st.error(item["error"])
+else:
+    st.error(f"{selected_stock_name} ({ticker}) 데이터를 가져올 수 없습니다. 인터넷 상태 또는 야후 파이낸스 서비스 상태를 확인해 주세요.")
